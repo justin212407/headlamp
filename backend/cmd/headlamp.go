@@ -934,49 +934,6 @@ func createHeadlampHandler(ctx context.Context, config *HeadlampConfig) http.Han
 	return r
 }
 
-func (c *HeadlampConfig) refreshAndSetToken(oidcAuthConfig *kubeconfig.OidcConfig,
-	cache cache.Cache[interface{}], token string,
-	w http.ResponseWriter, r *http.Request, cluster string, span trace.Span, ctx context.Context,
-) {
-	// The token type to use
-	tokenType := "id_token"
-	if c.OidcUseAccessToken {
-		tokenType = "access_token"
-	}
-
-	idpIssuerURL := c.OidcIdpIssuerURL
-	if idpIssuerURL == "" {
-		idpIssuerURL = oidcAuthConfig.IdpIssuerURL
-	}
-
-	newToken, err := auth.RefreshAndCacheNewToken(
-		ctx,
-		oidcAuthConfig,
-		cache,
-		tokenType,
-		token,
-		idpIssuerURL,
-	)
-	if err != nil {
-		logger.Log(logger.LevelError, map[string]string{"cluster": cluster},
-			err, "failed to refresh token")
-		c.TelemetryHandler.RecordError(span, err, "Token refresh failed")
-		c.TelemetryHandler.RecordErrorCount(ctx, attribute.String("error", "token_refresh_failure"))
-	} else if newToken != nil {
-		var newTokenString string
-		if c.OidcUseAccessToken {
-			newTokenString = newToken.Extra("access_token").(string)
-		} else {
-			newTokenString = newToken.Extra("id_token").(string)
-		}
-
-		// Set refreshed token in cookie
-		auth.SetTokenCookie(w, r, cluster, newTokenString, c.BaseURL, c.SessionTTL)
-
-		c.TelemetryHandler.RecordEvent(span, "Token refreshed successfully")
-	}
-}
-
 // setTokenFromCookie attempts to get a token from the cookie and set it as Authorization header.
 func setTokenFromCookie(r *http.Request, clusterName string) {
 	tokenFromCookie, err := auth.GetTokenFromCookie(r, clusterName)
@@ -1063,6 +1020,9 @@ func (c *HeadlampConfig) handleOIDCAuthConfigError(err error, w http.ResponseWri
 	return false
 }
 
+// TODO: moving functions one at a time, this will be relocated
+//
+//nolint:funlen
 func (c *HeadlampConfig) OIDCTokenRefreshMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -1114,7 +1074,21 @@ func (c *HeadlampConfig) OIDCTokenRefreshMiddleware(next http.Handler) http.Hand
 		}
 
 		// refresh and cache new token
-		c.refreshAndSetToken(oidcAuthConfig, c.Cache, token, w, r, cluster, span, ctx)
+		auth.RefreshAndSetToken(auth.RefreshAndSetTokenParams{
+			Ctx:                ctx,
+			OIDCAuthConfig:     oidcAuthConfig,
+			Cache:              c.Cache,
+			Token:              token,
+			Cluster:            cluster,
+			Span:               span,
+			Writer:             w,
+			Request:            r,
+			TelemetryHandler:   c.TelemetryHandler,
+			OIDCUseAccessToken: c.OidcUseAccessToken,
+			OIDCIdpIssuerURL:   c.OidcIdpIssuerURL,
+			BaseURL:            c.BaseURL,
+			SessionTTL:         c.SessionTTL,
+		})
 
 		next.ServeHTTP(w, r)
 		c.TelemetryHandler.RecordDuration(ctx, start,
